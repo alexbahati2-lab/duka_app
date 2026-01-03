@@ -1,93 +1,24 @@
 import os
-import sqlite3
+import re
 import streamlit as st
 from barcode import Code128
 from barcode.writer import ImageWriter
 
-# ---------------------------
-# Paths & Setup
-# ---------------------------
-DB_PATH = "database/stock.db"
-def get_product_by_barcode(barcode):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT name, category, price, quantity
-        FROM products
-        WHERE barcode = ?
-    """, (barcode,))
-    product = c.fetchone()
-    conn.close()
-    return product
+from database.tables import (
+    init_db,
+    barcode_exists,
+    generate_barcode_number,
+    add_product,
+    get_products,
+    delete_product
+)
 
-BARCODE_FOLDER = "assets/barcodes"
-
-os.makedirs("database", exist_ok=True)
+# ---------------------------
+# Paths
+# ---------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BARCODE_FOLDER = os.path.join(BASE_DIR, "barcodes")
 os.makedirs(BARCODE_FOLDER, exist_ok=True)
-
-# ---------------------------
-# Database Functions
-# ---------------------------
-def get_connection():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-def init_db():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            category TEXT,
-            price REAL NOT NULL,
-            quantity INTEGER NOT NULL,
-            barcode TEXT UNIQUE NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def generate_barcode_number():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT MAX(id) FROM products")
-    max_id = c.fetchone()[0]
-    conn.close()
-    return str((max_id or 0) + 1001)
-
-def add_product(name, category, price, quantity):
-    barcode_number = generate_barcode_number()
-    barcode_path = os.path.join(BARCODE_FOLDER, f"{barcode_number}.png")
-
-    # Generate barcode image
-    with open(barcode_path, "wb") as f:
-        Code128(barcode_number, writer=ImageWriter()).write(f)
-
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO products (name, category, price, quantity, barcode)
-        VALUES (?, ?, ?, ?, ?)
-    """, (name, category, price, quantity, barcode_number))
-    conn.commit()
-    conn.close()
-
-    return barcode_path
-
-def get_products():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, name, category, price, quantity, barcode FROM products")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def delete_product(product_id):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM products WHERE id = ?", (product_id,))
-    conn.commit()
-    conn.close()
 
 # ---------------------------
 # Streamlit UI
@@ -104,29 +35,62 @@ def product_ui():
         unsafe_allow_html=True
     )
 
+    # initialize DB tables if not exists
     init_db()
 
     # -------- Add Product --------
     with st.expander("➕ Add New Product", expanded=True):
-        name = st.text_input("Product Name")
-        category = st.text_input("Category")
-        price = st.number_input("Price (KSh)", min_value=0.0, format="%.2f")
-        quantity = st.number_input("Quantity", min_value=0, step=1)
+        # initialize session_state defaults if they don't exist
+        if "name" not in st.session_state:
+            st.session_state.name = ""
+        if "category" not in st.session_state:
+            st.session_state.category = ""
+        if "price" not in st.session_state:
+            st.session_state.price = 0.0
+        if "quantity" not in st.session_state:
+            st.session_state.quantity = 0
+        if "barcode" not in st.session_state:
+            st.session_state.barcode = generate_barcode_number()
 
-        if st.button("Add Product", use_container_width=True):
-            if name.strip() and price >= 0 and quantity >= 0:
-                barcode_file = add_product(name, category, price, quantity)
-                st.success(f"✅ {name} added successfully")
-                st.image(barcode_file, caption="Generated Barcode", width=220)
-                st.experimental_rerun()
-            else:
-                st.error("❌ Please fill all fields correctly")
+        with st.form("add_product_form"):
+            name = st.text_input("Product Name", key="name")
+            category = st.text_input("Category", key="category")
+            price = st.number_input("Price (KSh)", min_value=0.0, format="%.2f", key="price")
+            quantity = st.number_input("Quantity", min_value=0, step=1, key="quantity")
+            barcode = st.text_input(
+                "Barcode (editable)",
+                key="barcode",
+                help="Must be unique and alphanumeric"
+            )
+
+            submitted = st.form_submit_button("➕ Add Product")
+
+            if submitted:
+                barcode = barcode.strip()
+                if not name.strip():
+                    st.error("❌ Product name is required")
+                elif not re.match("^[A-Za-z0-9-]+$", barcode):
+                    st.error("❌ Barcode can only contain letters, numbers, and dashes")
+                elif barcode_exists(barcode):
+                    st.error("❌ Barcode already exists")
+                else:
+                    # generate barcode image
+                    barcode_path = os.path.join(BARCODE_FOLDER, f"{barcode}.png")
+                    with open(barcode_path, "wb") as f:
+                        Code128(barcode, writer=ImageWriter()).write(f)
+
+                    # add product to DB
+                    add_product(name, category, price, quantity, barcode)
+                    st.success(f"✅ {name} added successfully")
+                    st.image(barcode_path, width=220)
+
+                    # ✅ safe way to clear the form: rerun script
+                    st.rerun()
 
     st.markdown("---")
 
     # -------- Product List --------
     st.subheader("📦 Current Products")
-
     products = get_products()
 
     if not products:
@@ -135,7 +99,6 @@ def product_ui():
 
     for pid, name, category, price, qty, barcode in products:
         col1, col2, col3, col4, col5, col6 = st.columns([2, 2, 1, 1, 2, 1])
-
         col1.write(name)
         col2.write(category or "-")
         col3.write(f"KSh {price}")
@@ -147,43 +110,10 @@ def product_ui():
 
         if col6.button("🗑 Delete", key=f"del_{pid}"):
             delete_product(pid)
-            st.experimental_rerun()
-
-
-def init_db():
-    conn = get_connection()
-    c = conn.cursor()
-
-    # Products table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            category TEXT,
-            price REAL NOT NULL,
-            quantity INTEGER NOT NULL,
-            barcode TEXT UNIQUE NOT NULL
-        )
-    """)
-
-    # Sales table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sales (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_id INTEGER,
-            product_name TEXT,
-            quantity INTEGER,
-            price REAL,
-            total REAL,
-            sale_date TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
+            st.rerun()  # refresh product list after delete
 
 # ---------------------------
-# Run App
+# Run UI
 # ---------------------------
 if __name__ == "__main__":
     product_ui()

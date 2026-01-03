@@ -2,6 +2,8 @@ import streamlit as st
 from modules.products import product_ui
 from modules.sales import sales_ui
 from modules.reports import reports_ui
+from database.tables import init_db
+
 
 # ---------------------------
 # Page setup
@@ -25,6 +27,8 @@ page = st.sidebar.radio(
 # ---------------------------
 # Page routing
 # ---------------------------
+init_db()
+
 if page == "Products":
     product_ui()
 elif page == "Sales":
