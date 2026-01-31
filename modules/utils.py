@@ -6,6 +6,7 @@ from barcode import Code128
 from barcode.writer import ImageWriter
 
 # ---------------------------
+
 # Database helpers
 # ---------------------------
 DB_PATH = "database/stock.db"
